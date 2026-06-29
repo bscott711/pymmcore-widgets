@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Callable, Protocol, TypeVar, cast
+from typing import Any, Callable, Protocol, cast
 
 from pymmcore_plus import CMMCorePlus, DeviceType, Keyword, PropertyType
-from qtpy.QtCore import Qt, Signal
+from qtpy.QtCore import Qt, Signal  # type: ignore
 from qtpy.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,6 +19,11 @@ from superqt import QLabeledDoubleSlider, QLabeledSlider, utils
 
 STATE = Keyword.State.value
 LABEL = Keyword.Label.value
+
+# Sliders are backed by a 32-bit integer position; integer properties whose
+# limits fall outside this range can't be represented by a slider.
+_INT32_MIN = -(2**31)
+_INT32_MAX = 2**31 - 1
 
 
 # fmt: off
@@ -47,37 +52,51 @@ class PPropValueWidget(Protocol):
 # These widgets all implement PPropValueWidget for various PropertyTypes.
 # -----------------------------------------------------------------------
 
-T = TypeVar("T", bound=float)
+
+class _Ranged(Protocol):
+    def maximum(self) -> float: ...
+    def minimum(self) -> float: ...
+    def setMaximum(self, val: float) -> None: ...
+    def setMinimum(self, val: float) -> None: ...
 
 
-def _stretch_range_to_contain(wdg: QLabeledDoubleSlider, val: T) -> T:
+def _stretch_range_to_contain(wdg: _Ranged, val: float) -> float:
     """Set range of `wdg` to include `val`."""
     if val > wdg.maximum():
-        wdg.setMaximum(val)
+        wdg.setMaximum(float(val))
     if val < wdg.minimum():
-        wdg.setMinimum(val)
+        wdg.setMinimum(float(val))
     return val
 
 
-class IntegerWidget(QSpinBox):
-    """Slider suited to managing integer values."""
+class IntegerWidget(QDoubleSpinBox):
+    """Spinbox suited to managing integer values."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setDecimals(0)
+        self.setSingleStep(1)
+        self.setRange(-1e12, 1e12)
 
     def setValue(self, v: Any) -> None:
-        return super().setValue(  # type: ignore [no-any-return]
-            _stretch_range_to_contain(self, int(v))
-        )
+        val = float(v)
+        if val > self.maximum():
+            self.setMaximum(val)
+        if val < self.minimum():
+            self.setMinimum(val)
+        return super().setValue(val)  # type: ignore [no-any-return]
 
 
 class FloatWidget(QDoubleSpinBox):
     """Slider suited to managing float values."""
 
-    def setValue(self, v: Any) -> None:
+    def setValue(self, value: Any) -> None:
         # stretch decimals to fit value
-        dec = min(str(v).rstrip("0")[::-1].find("."), 8)
+        dec = min(str(value).rstrip("0")[::-1].find("."), 8)
         if dec > self.decimals():
             self.setDecimals(dec)
         return super().setValue(  # type: ignore [no-any-return]
-            _stretch_range_to_contain(self, float(v))
+            _stretch_range_to_contain(self, float(value))
         )
 
 
@@ -90,15 +109,28 @@ class _RangedMixin:
     ) -> None:
         super().__init__(orientation, parent)  # type: ignore
 
-    def setValue(self, v: float) -> None:
-        val = _stretch_range_to_contain(self, self.type_cast(v))
+    def setValue(self, value: float) -> None:
+        val = _stretch_range_to_contain(self, self.type_cast(value))
         return super().setValue(val)  # type: ignore
 
 
-class RangedIntegerWidget(_RangedMixin, QLabeledSlider):
+class RangedIntegerWidget(_RangedMixin, QLabeledDoubleSlider):
     """Slider suited to managing ranged integer values."""
 
-    type_cast = int
+    type_cast = float
+
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent: QWidget | None = None) -> None:
+        super().__init__(orientation, parent)
+        self.setDecimals(0)
+        self.setSingleStep(1)
+
+    def setValue(self, v: float) -> None:
+        val = float(self.type_cast(v))
+        if val > self.maximum():
+            self.setMaximum(val)
+        if val < self.minimum():
+            self.setMinimum(val)
+        return super().setValue(val)  # type: ignore
 
 
 class RangedFloatWidget(_RangedMixin, QLabeledDoubleSlider):
@@ -108,7 +140,7 @@ class RangedFloatWidget(_RangedMixin, QLabeledDoubleSlider):
 class IntBoolWidget(QCheckBox):
     """Checkbox for boolean values, which are integers in pymmcore."""
 
-    valueChanged = Signal(int)
+    valueChanged = Signal(int)  # type: ignore
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -129,7 +161,7 @@ class IntBoolWidget(QCheckBox):
 class ChoiceWidget(QComboBox):
     """Combobox for props with a set of allowed values."""
 
-    valueChanged = Signal(str)
+    valueChanged = Signal(str)  # type: ignore
 
     def __init__(
         self, mmcore: CMMCorePlus, dev: str, prop: str, parent: QWidget | None = None
@@ -150,7 +182,7 @@ class ChoiceWidget(QComboBox):
         self._mmc.events.systemConfigurationLoaded.disconnect(self._refresh_choices)
 
     def _refresh_choices(self) -> None:
-        with utils.signals_blocked(self):
+        with utils.signals_blocked(cast("QObject", self)):
             self.clear()
             try:
                 allowed = list(self._get_allowed())
@@ -191,7 +223,7 @@ class ChoiceWidget(QComboBox):
 class StringWidget(QLineEdit):
     """String widget for pretty much everything else."""
 
-    valueChanged = Signal(str)
+    valueChanged = Signal(str)  # type: ignore
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -213,7 +245,7 @@ class StringWidget(QLineEdit):
 class ReadOnlyWidget(QLabel):
     """String widget for pretty much everything else."""
 
-    valueChanged = Signal()  # just for the protocol... not used
+    valueChanged = Signal()  # type: ignore  # just for the protocol... not used
 
     def value(self) -> str:
         """Get value."""
@@ -238,13 +270,23 @@ def _creat_prop_widget(mmcore: CMMCorePlus, dev: str, prop: str) -> PPropValueWi
 
     elif allowed := mmcore.getAllowedPropertyValues(dev, prop):
         if ptype is PropertyType.Integer and set(allowed) == {"0", "1"}:
-            return IntBoolWidget()
-        wdg = ChoiceWidget(mmcore, dev, prop)
+            wdg = cast("PPropValueWidget", IntBoolWidget())
+        else:
+            wdg = ChoiceWidget(mmcore, dev, prop)
     elif prop in {STATE, LABEL} and mmcore.getDeviceType(dev) == DeviceType.StateDevice:
         # TODO: This logic is very similar to StateDeviceWidget. use this in the future?
         wdg = ChoiceWidget(mmcore, dev, prop)
     elif ptype in (PropertyType.Integer, PropertyType.Float):
-        if not mmcore.hasPropertyLimits(dev, prop):
+        low = mmcore.getPropertyLowerLimit(dev, prop)
+        high = mmcore.getPropertyUpperLimit(dev, prop)
+        # A slider is backed by a 32-bit integer position, so integer properties
+        # whose limits exceed the int32 range (e.g. some camera "*Limit" props)
+        # overflow when fed to the slider.  Such a slider would be unusable
+        # anyway, so fall back to a spinbox for these.
+        slider_unsafe = ptype is PropertyType.Integer and not (
+            _INT32_MIN <= low and high <= _INT32_MAX
+        )
+        if not mmcore.hasPropertyLimits(dev, prop) or slider_unsafe:
             wdg = IntegerWidget() if ptype is PropertyType.Integer else FloatWidget()
         else:
             wdg = (
@@ -252,8 +294,8 @@ def _creat_prop_widget(mmcore: CMMCorePlus, dev: str, prop: str) -> PPropValueWi
                 if ptype is PropertyType.Integer
                 else RangedFloatWidget()
             )
-            wdg.setMinimum(wdg.type_cast(mmcore.getPropertyLowerLimit(dev, prop)))
-            wdg.setMaximum(wdg.type_cast(mmcore.getPropertyUpperLimit(dev, prop)))
+            wdg.setMinimum(wdg.type_cast(low))
+            wdg.setMaximum(wdg.type_cast(high))
     else:
         wdg = StringWidget()
     return cast("PPropValueWidget", wdg)
@@ -291,7 +333,7 @@ class PropertyWidget(QWidget):
     """
 
     _value_widget: PPropValueWidget
-    valueChanged = Signal(object)
+    valueChanged = Signal(object)  # type: ignore
 
     def __init__(
         self,
@@ -320,8 +362,9 @@ class PropertyWidget(QWidget):
         self._device_label = device_label
         self._prop_name = prop_name
 
-        self.setLayout(QHBoxLayout())
-        self.layout().setContentsMargins(0, 0, 0, 0)
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.setLayout(layout)
 
         # Create the widget based on property type and allowed choices
         self._value_widget = _creat_prop_widget(self._mmc, device_label, prop_name)
@@ -331,7 +374,7 @@ class PropertyWidget(QWidget):
         self._mmc.events.propertyChanged.connect(self._on_core_change)
         self._value_widget.valueChanged.connect(self._on_value_widget_change)
 
-        self.layout().addWidget(cast("QWidget", self._value_widget))
+        layout.addWidget(cast("QWidget", self._value_widget))
         self.destroyed.connect(self._disconnect)
 
     def _try_update_from_core(self) -> Any:
@@ -352,7 +395,7 @@ class PropertyWidget(QWidget):
     # connect events and queue for disconnection on widget destroyed
     def _on_core_change(self, dev_label: str, prop_name: str, new_val: Any) -> None:
         if dev_label == self._device_label and prop_name == self._prop_name:
-            with utils.signals_blocked(self._value_widget):
+            with utils.signals_blocked(cast("QObject", self._value_widget)):
                 self._value_widget.setValue(new_val)
 
     def _on_value_widget_change(self, value: Any) -> None:
@@ -409,7 +452,7 @@ class PropertyWidget(QWidget):
         (If all goes well this shouldn't be necessary, but if a propertyChanged
         event is missed, this can be used).
         """
-        with utils.signals_blocked(self._value_widget):
+        with utils.signals_blocked(cast("QObject", self._value_widget)):
             self._try_update_from_core()
 
     def propertyType(self) -> PropertyType:
