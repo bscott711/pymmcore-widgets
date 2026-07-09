@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, cast
 
 from pyconify import svg_path
 from pymmcore_plus import CMMCorePlus, DeviceType, Keyword
-from qtpy.QtCore import QEvent, QObject, QSize, Qt, QTimerEvent, Signal
+from qtpy.QtCore import QEvent, QObject, QSize, Qt, Signal
 from qtpy.QtGui import QContextMenuEvent
 from qtpy.QtWidgets import (
     QCheckBox,
@@ -22,6 +22,7 @@ from qtpy.QtWidgets import (
 from superqt.iconify import QIconifyIcon
 from superqt.utils import signals_blocked
 
+from ._async_poller import AsyncPoller
 from ._q_stage_controller import QStageMoveAccumulator
 
 if TYPE_CHECKING:
@@ -231,7 +232,6 @@ class StageWidget(QWidget):
         self._mmc = mmcore or CMMCorePlus.instance()
         self._levels = levels
         self._device = device
-        self._poll_timer_id: int | None = None
 
         self._dtype = self._mmc.getDeviceType(self._device)
         if self._dtype not in {DeviceType.Stage, DeviceType.XYStage}:
@@ -318,12 +318,23 @@ class StageWidget(QWidget):
 
         # SIGNALS -----------------------------------------------
 
+        # Poll the stage position off the GUI thread (getXYPosition/getPosition are
+        # blocking serial reads); AsyncPoller applies the result on the GUI thread so
+        # the event loop / live view is never stalled while polling.
+        self._poller = AsyncPoller(
+            self._read_position,
+            self._apply_position,
+            interval_ms=500,
+            parent=self,
+            active=self.isVisible,
+        )
+
         self._set_as_default_btn.toggled.connect(self._on_radiobutton_toggled)
         self._move_btns.moveRequested.connect(self._on_move_requested)
         self._poll_cb.toggled.connect(self._toggle_poll_timer)
         self._mmc.events.propertyChanged.connect(self._on_prop_changed)
         self._mmc.events.systemConfigurationLoaded.connect(self._on_system_cfg)
-        self._stage_controller.moveFinished.connect(self._update_position_from_core)
+        self._stage_controller.moveFinished.connect(self._on_move_finished)
 
         # INITIALIZATION ----------------------------------------
 
@@ -399,17 +410,14 @@ class StageWidget(QWidget):
 
     def _toggle_poll_timer(self, on: bool) -> None:
         if on:
-            if self._poll_timer_id is None:
-                self._poll_timer_id = self.startTimer(500)
+            self._poller.start()
+            self._poller.poll_now(force=True)
         else:
-            if self._poll_timer_id is not None:
-                self.killTimer(self._poll_timer_id)
-                self._poll_timer_id = None
+            self._poller.stop()
 
-    def timerEvent(self, event: QTimerEvent | None) -> None:
-        if event and event.timerId() == self._poll_timer_id:
-            self._update_position_from_core()
-        super().timerEvent(event)
+    def _on_move_finished(self) -> None:
+        # Refresh the displayed position after a move completes, off the GUI thread.
+        self._poller.poll_now(force=True)
 
     def eventFilter(self, obj: QObject | None, event: QEvent | None) -> bool:
         # NB QAbstractSpinBox has its own Context Menu handler, which conflicts
@@ -420,16 +428,41 @@ class StageWidget(QWidget):
             return True
         return super().eventFilter(obj, event)  # type: ignore [no-any-return]
 
-    def _update_position_from_core(self) -> None:
+    def _read_position(self) -> tuple[float, float] | float | None:
+        """Read the stage position from the core (runs on a worker thread).
+
+        Returns ``(x, y)`` for an XY stage, a float for a single-axis stage, or
+        ``None`` if the device is not currently loaded.  Performs only core access
+        -- it must not touch any Qt widget.
+        """
         if self._device not in self._mmc.getLoadedDevicesOfType(self._dtype):
-            return
+            return None
         if self._is_2axis:
             x, y = self._mmc.getXYPosition(self._device)
-            self._x_pos.setValue(x)
-            self._y_pos.setValue(y)
+            return (x, y)
+        return self._mmc.getPosition(self._device)
+
+    def _apply_position(self, pos: tuple[float, float] | float | None) -> None:
+        """Apply a position read to the spinboxes (runs on the GUI thread)."""
+        if pos is None:
+            return
+        if self._is_2axis:
+            x, y = cast("tuple[float, float]", pos)
+            with signals_blocked(self._x_pos):
+                self._x_pos.setValue(x)
+            with signals_blocked(self._y_pos):
+                self._y_pos.setValue(y)
         else:
-            y = self._mmc.getPosition(self._device)
-            self._y_pos.setValue(y)
+            with signals_blocked(self._y_pos):
+                self._y_pos.setValue(cast("float", pos))
+
+    def _update_position_from_core(self) -> None:
+        """Synchronously read and apply the current position (GUI thread).
+
+        Used for one-shot fills (construction, configuration load); periodic updates
+        go through :class:`AsyncPoller` so the event loop is never blocked.
+        """
+        self._apply_position(self._read_position())
 
     def _on_move_requested(self, xmag: float, ymag: float) -> None:
         if self._invert_x.isChecked():
