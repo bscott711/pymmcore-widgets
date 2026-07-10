@@ -348,6 +348,37 @@ def test_time_table(qtbot: QtBot) -> None:
     assert wdg.table().rowCount() == 0
 
 
+def test_time_table_zero_interval_does_not_crash(qtbot: QtBot) -> None:
+    """https://github.com -- ZeroDivisionError editing duration/loops before interval."""
+    wdg = TimePlanWidget()
+    qtbot.addWidget(wdg)
+    wdg.show()
+
+    wdg.setValue(useq.TIntervalDuration(interval=1, duration=2))
+    interval = wdg.table().cellWidget(0, wdg.table().indexOf(wdg.INTERVAL))
+    duration = wdg.table().cellWidget(0, wdg.table().indexOf(wdg.DURATION))
+    loops = wdg.table().cellWidget(0, wdg.table().indexOf(wdg.LOOPS))
+    assert loops.value() == 3
+
+    # simulate clearing the interval to 0 while in duration mode -- must not raise
+    wdg.table().setCurrentCell(0, wdg.table().indexOf(wdg.INTERVAL))
+    interval.setText("0 s")
+    interval.textModified.emit("", "")
+    assert loops.value() == 3  # left unchanged, not recomputed against 0
+
+    # editing duration further with a zero interval also must not raise
+    wdg.table().setCurrentCell(0, wdg.table().indexOf(wdg.DURATION))
+    duration.setText("4 s")
+    duration.textModified.emit("", "")
+    assert loops.value() == 3
+
+    # restoring a real interval resumes normal loops computation
+    wdg.table().setCurrentCell(0, wdg.table().indexOf(wdg.INTERVAL))
+    interval.setText("1 s")
+    interval.textModified.emit("", "")
+    assert loops.value() == 5
+
+
 def test_z_plan_widget(qtbot: QtBot) -> None:
     wdg = ZPlanWidget()
     qtbot.addWidget(wdg)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from qtpy.QtGui import QIcon
@@ -123,15 +124,26 @@ class TimePlanWidget(DataTableWidget):
         except KeyError:
             return
 
+        # TIntervalDuration.loops divides duration // interval -- can't be
+        # derived (and shouldn't overwrite the loops column) while interval
+        # is zero, e.g. mid-edit before a real interval has been entered.
+        # `plan.interval` (not `data[...]`, which may be a raw number of
+        # seconds) is used since pydantic already coerced it to a timedelta.
+        zero_interval = plan.interval == timedelta(0)
+
         if _current_col == loop_col:
             self.DURATION.set_cell_data(
                 table, _current_row, duration_col, plan.duration
             )
         elif _current_col == duration_col:
-            self.LOOPS.set_cell_data(table, _current_row, loop_col, plan.loops)
+            if not zero_interval:
+                self.LOOPS.set_cell_data(table, _current_row, loop_col, plan.loops)
         elif _current_col == table.indexOf(self.INTERVAL):
             if self._mode_column == duration_col:
-                self.LOOPS.set_cell_data(table, _current_row, loop_col, plan.loops)
+                if not zero_interval:
+                    self.LOOPS.set_cell_data(
+                        table, _current_row, loop_col, plan.loops
+                    )
             else:
                 self.DURATION.set_cell_data(
                     table, _current_row, duration_col, plan.duration
