@@ -392,3 +392,14 @@ def test_zero_is_disabled_with_the_widget(
     assert not stage_z._origin_action.isEnabled()
     stage_z._enable_wdg(True)
     assert stage_z._origin_btn.isEnabled()
+
+
+def test_zero_can_be_hidden(qtbot: QtBot, global_mmcore: CMMCorePlus) -> None:
+    # e.g. a piezo whose 0 should stay at the center of its travel
+    stage_z = StageWidget("Z", levels=3, allow_set_origin=False)
+    qtbot.addWidget(stage_z)
+    assert stage_z._origin_btn.isHidden()
+    assert not stage_z._origin_action.isVisible()
+    stage_z.enable_set_origin(True)
+    assert not stage_z._origin_btn.isHidden()
+    assert stage_z._origin_action.isVisible()

@@ -214,6 +214,10 @@ class StageWidget(QWidget):
     position_label_below: bool | None
         If True, the position displays will appear below the move buttons.
         If False, the position displays will appear to the right of the move buttons.
+    allow_set_origin: bool
+        If True (default), a "Zero" button and a position-menu action make the current
+        position the stage's origin. If False they are hidden, e.g. for a piezo whose 0
+        should stay at the center of its travel.
     parent : QWidget | None
         Optional parent widget.
     mmcore : CMMCorePlus | None
@@ -232,6 +236,7 @@ class StageWidget(QWidget):
         *,
         absolute_positioning: bool = False,
         position_label_below: bool = True,
+        allow_set_origin: bool = True,
         parent: QWidget | None = None,
         mmcore: CMMCorePlus | None = None,
     ):
@@ -357,6 +362,7 @@ class StageWidget(QWidget):
 
         self._update_position_from_core()
         self.enable_absolute_positioning(absolute_positioning)
+        self.enable_set_origin(allow_set_origin)
         self._set_as_default()
 
     def step(self) -> float:
@@ -379,6 +385,19 @@ class StageWidget(QWidget):
         self._pos_toggle_action.setChecked(enabled)
         for box in self._pos_boxes:
             box.setEnabled(enabled)
+
+    def enable_set_origin(self, enabled: bool) -> None:
+        """Show or hide the "Zero" button and the position-menu action.
+
+        Parameters
+        ----------
+        enabled: bool:
+            If False, the user can't make the current position the origin from the
+            widget (e.g. a piezo whose 0 should stay at the center of its travel).
+            :meth:`set_origin` still works.
+        """
+        self._origin_btn.setVisible(enabled)
+        self._origin_action.setVisible(enabled)
 
     def set_origin(self) -> None:
         """Make the stage's current position its origin (0).
