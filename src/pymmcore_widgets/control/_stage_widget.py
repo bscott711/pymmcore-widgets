@@ -13,6 +13,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QSpinBox,
@@ -28,9 +29,16 @@ from ._q_stage_controller import QStageMoveAccumulator
 if TYPE_CHECKING:
     from typing import Any
 
+    from PyQt6.QtGui import QAction
+else:
+    from qtpy.QtWidgets import QAction
+
 CORE = Keyword.CoreDevice
 XY_STAGE = Keyword.CoreXYStage
 FOCUS = Keyword.CoreFocus
+# After setting the origin, a position further than this from 0 (µm) means the device
+# didn't take it (some devices accept the command and do nothing).
+ORIGIN_TOLERANCE_UM = 0.5
 
 MOVE_BUTTONS: dict[str, tuple[int, int, int, int]] = {
     # btn glyph                (r, c, xmag, ymag)
@@ -206,6 +214,10 @@ class StageWidget(QWidget):
     position_label_below: bool | None
         If True, the position displays will appear below the move buttons.
         If False, the position displays will appear to the right of the move buttons.
+    allow_set_origin: bool
+        If True (default), a "Zero" button and a position-menu action make the current
+        position the stage's origin. If False they are hidden, e.g. for a piezo whose 0
+        should stay at the center of its travel.
     parent : QWidget | None
         Optional parent widget.
     mmcore : CMMCorePlus | None
@@ -224,6 +236,7 @@ class StageWidget(QWidget):
         *,
         absolute_positioning: bool = False,
         position_label_below: bool = True,
+        allow_set_origin: bool = True,
         parent: QWidget | None = None,
         mmcore: CMMCorePlus | None = None,
     ):
@@ -257,6 +270,9 @@ class StageWidget(QWidget):
         self._pos_toggle_action.setCheckable(True)
         self._pos_toggle_action.setChecked(absolute_positioning)
         self._pos_toggle_action.triggered.connect(self.enable_absolute_positioning)
+        self._origin_action = QAction("Set Current Position as Origin", self)
+        self._pos_menu.addAction(self._origin_action)
+        self._origin_action.triggered.connect(self._on_set_origin_clicked)
 
         if self._is_2axis:
             self._pos.addWidget(QLabel("X: "))
@@ -273,6 +289,12 @@ class StageWidget(QWidget):
 
         for box in self._pos_boxes:
             box.installEventFilter(self)
+        self._origin_btn = QPushButton("Zero")
+        self._origin_btn.setToolTip(
+            f"Make the current position of {self._device} its origin (0)"
+        )
+        self._origin_btn.clicked.connect(self._on_set_origin_clicked)
+        self._pos.addWidget(self._origin_btn)
         self._pos.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self._halt = HaltButton(device, self._mmc, self)
@@ -340,6 +362,7 @@ class StageWidget(QWidget):
 
         self._update_position_from_core()
         self.enable_absolute_positioning(absolute_positioning)
+        self.enable_set_origin(allow_set_origin)
         self._set_as_default()
 
     def step(self) -> float:
@@ -363,9 +386,72 @@ class StageWidget(QWidget):
         for box in self._pos_boxes:
             box.setEnabled(enabled)
 
+    def enable_set_origin(self, enabled: bool) -> None:
+        """Show or hide the "Zero" button and the position-menu action.
+
+        Parameters
+        ----------
+        enabled: bool:
+            If False, the user can't make the current position the origin from the
+            widget (e.g. a piezo whose 0 should stay at the center of its travel).
+            :meth:`set_origin` still works.
+        """
+        self._origin_btn.setVisible(enabled)
+        self._origin_action.setVisible(enabled)
+
+    def set_origin(self) -> None:
+        """Make the stage's current position its origin (0).
+
+        Uses the device's own origin command (``setOriginXY`` for an XY stage, both
+        axes; ``setOrigin`` otherwise): the device redefines its coordinates, so every
+        position read from it from then on is relative to here.
+
+        Raises
+        ------
+        RuntimeError
+            If the device rejects the command, or still reports a position more than
+            ``ORIGIN_TOLERANCE_UM`` from 0 afterwards (it doesn't support an origin).
+        """
+        if self._is_2axis:
+            self._mmc.setOriginXY(self._device)
+        else:
+            self._mmc.setOrigin(self._device)
+        pos = self._read_position()
+        self._apply_position(pos)
+        if pos is None:
+            return
+        values = pos if isinstance(pos, tuple) else (pos,)
+        if any(abs(v) > ORIGIN_TOLERANCE_UM for v in values):
+            where = ", ".join(f"{v:.1f}" for v in values)
+            raise RuntimeError(
+                f"{self._device} still reports {where} µm: it doesn't seem to "
+                "support setting its origin."
+            )
+
+    def _on_set_origin_clicked(self) -> None:
+        if self._is_2axis:
+            where = f"X {self._x_pos.value():.1f}, Y {self._y_pos.value():.1f} µm"
+        else:
+            where = f"{self._y_pos.value():.1f} µm"
+        answer = QMessageBox.question(
+            self,
+            "Set origin",
+            f"Make the current position of {self._device} ({where}) its new 0?\n\n"
+            "Positions recorded before (saved positions, absolute Z plans) will be "
+            "off by that much.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.set_origin()
+        except Exception as e:
+            QMessageBox.warning(self, "Set origin", f"Could not set the origin: {e}")
+
     def _enable_wdg(self, enabled: bool) -> None:
         self._step.setEnabled(enabled)
         self._move_btns.setEnabled(enabled)
+        self._origin_btn.setEnabled(enabled)
+        self._origin_action.setEnabled(enabled)
         for box in self._pos_boxes:
             box.setEnabled(enabled and self._pos_toggle_action.isChecked())
         self.snap_checkbox.setEnabled(enabled)

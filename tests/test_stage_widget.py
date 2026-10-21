@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
 from pymmcore_plus import DeviceType
+from qtpy.QtWidgets import QMessageBox
 
 from pymmcore_widgets.control._stage_widget import StageWidget
 
@@ -285,3 +287,119 @@ def test_invert_axis(qtbot: QtBot, global_mmcore: CMMCorePlus) -> None:
     z_up_2.widget().click()
 
     assert global_mmcore.getPosition() == 20.0
+
+
+def _fake_origin(core: CMMCorePlus, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """The demo stages ignore setOrigin: stand in a device that takes it."""
+    calls: list[str] = []
+    offset = {"Z": 0.0, "XY": (0.0, 0.0)}
+    real_get, real_get_xy = core.getPosition, core.getXYPosition
+
+    def set_origin(label: str) -> None:
+        calls.append(label)
+        offset["Z"] = real_get(label)
+
+    def set_origin_xy(label: str) -> None:
+        calls.append(label)
+        offset["XY"] = tuple(real_get_xy(label))
+
+    monkeypatch.setattr(core, "setOrigin", set_origin)
+    monkeypatch.setattr(core, "setOriginXY", set_origin_xy)
+    monkeypatch.setattr(core, "getPosition", lambda *a: real_get(*a) - offset["Z"])
+    monkeypatch.setattr(
+        core,
+        "getXYPosition",
+        lambda *a: [v - o for v, o in zip(real_get_xy(*a), offset["XY"])],
+    )
+    return calls
+
+
+def _answer(monkeypatch: pytest.MonkeyPatch, button: QMessageBox.StandardButton):
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: button)
+    warnings: list[str] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: warnings.append(a[2]))
+    return warnings
+
+
+def test_z_stage_zero_sets_the_origin(
+    qtbot: QtBot, global_mmcore: CMMCorePlus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _fake_origin(global_mmcore, monkeypatch)
+    warnings = _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    global_mmcore.setPosition("Z", 60.0)
+    global_mmcore.waitForDevice("Z")
+    stage_z = StageWidget("Z", levels=3)
+    qtbot.addWidget(stage_z)
+    assert stage_z._y_pos.value() == 60.0
+
+    stage_z._origin_btn.click()
+    assert calls == ["Z"]
+    assert stage_z._y_pos.value() == 0.0
+    assert global_mmcore.getPosition("Z") == 0.0
+    assert warnings == []
+
+
+def test_xy_stage_zero_sets_both_axes(
+    qtbot: QtBot, global_mmcore: CMMCorePlus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _fake_origin(global_mmcore, monkeypatch)
+    _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    global_mmcore.setXYPosition("XY", 100.0, 200.0)
+    global_mmcore.waitForDevice("XY")
+    stage_xy = StageWidget("XY", levels=3)
+    qtbot.addWidget(stage_xy)
+
+    stage_xy._origin_action.trigger()  # the position boxes' right-click menu
+    assert calls == ["XY"]
+    assert abs(stage_xy._x_pos.value()) < 0.1
+    assert abs(stage_xy._y_pos.value()) < 0.1
+
+
+def test_zero_does_nothing_when_not_confirmed(
+    qtbot: QtBot, global_mmcore: CMMCorePlus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _fake_origin(global_mmcore, monkeypatch)
+    _answer(monkeypatch, QMessageBox.StandardButton.No)
+    stage_z = StageWidget("Z", levels=3)
+    qtbot.addWidget(stage_z)
+    stage_z._origin_btn.click()
+    assert calls == []
+
+
+def test_zero_warns_when_the_device_ignores_it(
+    qtbot: QtBot, global_mmcore: CMMCorePlus, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The demo Z stage accepts setOrigin and keeps reporting the same position.
+    warnings = _answer(monkeypatch, QMessageBox.StandardButton.Yes)
+    global_mmcore.setPosition("Z", 60.0)
+    global_mmcore.waitForDevice("Z")
+    stage_z = StageWidget("Z", levels=3)
+    qtbot.addWidget(stage_z)
+    stage_z._origin_btn.click()
+    assert len(warnings) == 1
+    assert "doesn't seem to support" in warnings[0]
+    with pytest.raises(RuntimeError, match=r"60\.0"):
+        stage_z.set_origin()
+
+
+def test_zero_is_disabled_with_the_widget(
+    qtbot: QtBot, global_mmcore: CMMCorePlus
+) -> None:
+    stage_z = StageWidget("Z", levels=3)
+    qtbot.addWidget(stage_z)
+    stage_z._enable_wdg(False)
+    assert not stage_z._origin_btn.isEnabled()
+    assert not stage_z._origin_action.isEnabled()
+    stage_z._enable_wdg(True)
+    assert stage_z._origin_btn.isEnabled()
+
+
+def test_zero_can_be_hidden(qtbot: QtBot, global_mmcore: CMMCorePlus) -> None:
+    # e.g. a piezo whose 0 should stay at the center of its travel
+    stage_z = StageWidget("Z", levels=3, allow_set_origin=False)
+    qtbot.addWidget(stage_z)
+    assert stage_z._origin_btn.isHidden()
+    assert not stage_z._origin_action.isVisible()
+    stage_z.enable_set_origin(True)
+    assert not stage_z._origin_btn.isHidden()
+    assert stage_z._origin_action.isVisible()
